@@ -94,7 +94,16 @@ const shorten = (t: string) => (t.startsWith('{') ? 'Here you go.' : t.split(/(?
 
 library.onChange = () => ui.render();
 
-// ---- drag & drop songs (the one non-voice affordance: getting files in) ----
+// ---- getting music in: the one non-voice affordance (browsers need a click/keypress) ----
+addEventListener('keydown', async (e: KeyboardEvent) => {
+  if (e.key.toLowerCase() !== 'm' || game.screen === 'boot' || game.screen === 'play') return;
+  const n = await library.pickFolder();
+  if (n) {
+    fx.announce(`+${n} SONG${n > 1 ? 'S' : ''}`, '#00e5ff');
+    agent.context(`${n} new song(s) were just added from the music folder and are being analysed.`);
+  }
+});
+
 addEventListener('dragover', (e) => e.preventDefault());
 addEventListener('drop', async (e: DragEvent) => {
   e.preventDefault();
@@ -138,7 +147,9 @@ async function boot() {
       addEventListener('pointerdown', go);
     });
     await audio.resume();
+    await library.restoreFolder(true); // the wake-up keypress lets us re-grant folder access
   }
+  await library.restoreFolder(false);
 
   game.go('lobby');
   if (agent.configured) {

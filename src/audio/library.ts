@@ -35,6 +35,16 @@ function readId3(buf: ArrayBuffer): { title?: string; artist?: string; genre?: s
   return { title: out.TIT2 || undefined, artist: out.TPE1 || undefined, genre: out.TCON || undefined };
 }
 
+// File System Access API bits that lib.dom doesn't ship yet.
+type PermState = 'granted' | 'denied' | 'prompt';
+interface FsHandle { kind: 'file' | 'directory'; name: string }
+interface FsFileHandle extends FsHandle { getFile(): Promise<File> }
+interface FsDirHandle extends FsHandle {
+  values(): AsyncIterable<FsHandle>;
+  queryPermission(o: { mode: 'read' }): Promise<PermState>;
+  requestPermission(o: { mode: 'read' }): Promise<PermState>;
+}
+
 let ctx: AudioContext | null = null;
 const audioCtx = () => (ctx ??= new AudioContext());
 
@@ -49,11 +59,17 @@ export class Library {
     await this.rescan();
   }
 
-  /** Scan the server-side music folder for new tracks. Returns number of new songs. */
+  /** Rescan the server-side music folder (local dev server) and/or the picked folder. Returns number of new songs. */
   async rescan(): Promise<number> {
+    return (await this.scanServerFolder()) + (await this.scanPickedFolder());
+  }
+
+  private async scanServerFolder(): Promise<number> {
     let files: { file: string; size: number }[] = [];
     try {
-      files = await (await fetch('/api/music')).json();
+      const r = await fetch('/api/music');
+      if (!r.ok || !r.headers.get('content-type')?.includes('json')) return 0; // hosted build: no server folder
+      files = await r.json();
     } catch {
       return 0;
     }
@@ -73,6 +89,65 @@ export class Library {
     this.onChange();
     void this.analyseAll();
     return added;
+  }
+
+  // ---- picked folder (hosted builds, File System Access API) ----
+  // The browser needs one click/keypress to grant access; after that the handle
+  // is remembered and re-scanned on "rescan my music".
+  private dir: FsDirHandle | null = null;
+
+  get canPickFolder() {
+    return 'showDirectoryPicker' in window;
+  }
+
+  /** Must run inside a user gesture. */
+  async pickFolder(): Promise<number> {
+    if (!this.canPickFolder) return this.pickFiles();
+    try {
+      this.dir = await (window as unknown as { showDirectoryPicker(o: object): Promise<FsDirHandle> }).showDirectoryPicker({ id: 'music', mode: 'read' });
+    } catch {
+      return 0; // cancelled
+    }
+    await db.put('kv', 'musicDir', this.dir);
+    return this.scanPickedFolder();
+  }
+
+  /** Fallback for browsers without folder access: a multi-file picker. */
+  private pickFiles(): Promise<number> {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.accept = 'audio/*';
+      input.onchange = async () => resolve(await this.addFiles([...(input.files ?? [])]));
+      input.click();
+    });
+  }
+
+  /** Re-attach the remembered folder. Pass `gesture` when called from a click/keypress so we may prompt. */
+  async restoreFolder(gesture: boolean): Promise<number> {
+    this.dir ??= (await db.get<FsDirHandle>('kv', 'musicDir')) ?? null;
+    if (!this.dir) return 0;
+    let perm = await this.dir.queryPermission({ mode: 'read' });
+    if (perm !== 'granted' && gesture) perm = await this.dir.requestPermission({ mode: 'read' }).catch(() => 'denied' as const);
+    return perm === 'granted' ? this.scanPickedFolder() : 0;
+  }
+
+  get hasFolder() {
+    return !!this.dir;
+  }
+
+  private async scanPickedFolder(): Promise<number> {
+    if (!this.dir || (await this.dir.queryPermission({ mode: 'read' })) !== 'granted') return 0;
+    const files: File[] = [];
+    const walk = async (d: FsDirHandle, depth: number) => {
+      for await (const h of d.values()) {
+        if (h.kind === 'file' && AUDIO_RE.test(h.name)) files.push(await (h as FsFileHandle).getFile());
+        else if (h.kind === 'directory' && depth < 3) await walk(h as FsDirHandle, depth + 1);
+      }
+    };
+    await walk(this.dir, 0);
+    return this.addFiles(files);
   }
 
   async addFiles(files: File[]): Promise<number> {

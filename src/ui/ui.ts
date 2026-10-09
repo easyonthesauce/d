@@ -71,7 +71,7 @@ export class UI {
             ? ['Play something energetic', 'What songs have we got?', 'Make it extreme']
             : ["I'm ready, let's go!", 'Make it hard', 'Who am I?', 'Show the leaderboard'],
       )}
-      ${!this.library.songs.length ? `<p class="dim center">Drop songs into the <b>music/</b> folder (or drag them onto this screen) and say “rescan my music”.</p>` : ''}
+      ${!this.library.songs.length ? `<p class="dim center">Press <b>M</b> to pick your music folder (or drag songs onto this screen), then say “rescan my music” whenever you add more.</p>` : ''}
     </section>`;
   }
 
